@@ -11641,6 +11641,131 @@ public class ApiMgtDAO {
     }
 
     /**
+     * Gets the local scope keys attached to the resources of the revisions of any version of the given API and to the
+     * resources of API Products that are built on any version of the given API.
+     *
+     * @param uuid     API uuid
+     * @param tenantId Tenant Id
+     * @return Local Scope keys set
+     * @throws APIManagementException if fails to get the local scope keys
+     */
+    public Set<String> getLocalScopeKeysUsedByRevisionsAndAPIProducts(String uuid, int tenantId)
+            throws APIManagementException {
+
+        Set<String> localScopes = new HashSet<>();
+        try (Connection connection = APIMgtDBUtil.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(
+                     SQLConstants.GET_LOCAL_SCOPES_USED_BY_API_REVISIONS_AND_API_PRODUCTS_SQL)) {
+            APIIdentifier apiIdentifier = getAPIIdentifierFromUUID(uuid);
+            if (apiIdentifier == null) {
+                return localScopes;
+            }
+            preparedStatement.setString(1, apiIdentifier.getApiName());
+            preparedStatement.setInt(2, tenantId);
+            preparedStatement.setInt(3, tenantId);
+            try (ResultSet rs = preparedStatement.executeQuery()) {
+                while (rs.next()) {
+                    localScopes.add(rs.getString("SCOPE_NAME"));
+                }
+            }
+        } catch (SQLException e) {
+            handleException("Failed while getting local scopes used by API revisions and API Products for API: "
+                    + uuid + " tenant: " + tenantId, e);
+        }
+        return localScopes;
+    }
+
+    /**
+     * Gets the local scope keys attached to the resources of the given API Product, in the current API Product and in
+     * its revisions.
+     *
+     * @param productUuid API Product uuid
+     * @param tenantId    Tenant Id
+     * @return Local Scope keys set
+     * @throws APIManagementException if fails to get the local scope keys
+     */
+    public Set<String> getLocalScopeKeysOfAPIProduct(String productUuid, int tenantId) throws APIManagementException {
+
+        Set<String> localScopes = new HashSet<>();
+        try (Connection connection = APIMgtDBUtil.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(
+                     SQLConstants.GET_LOCAL_SCOPES_OF_API_PRODUCT_SQL)) {
+            preparedStatement.setInt(1, getAPIID(productUuid, connection));
+            preparedStatement.setInt(2, tenantId);
+            preparedStatement.setInt(3, tenantId);
+            try (ResultSet rs = preparedStatement.executeQuery()) {
+                while (rs.next()) {
+                    localScopes.add(rs.getString("SCOPE_NAME"));
+                }
+            }
+        } catch (SQLException e) {
+            handleException("Failed while getting local scopes of API Product: " + productUuid + " tenant: "
+                    + tenantId, e);
+        }
+        return localScopes;
+    }
+
+    /**
+     * Gets the local scope keys attached to the resources of the given API, in the current API, in its revisions and
+     * in the API Products built on it.
+     *
+     * @param uuid     API uuid
+     * @param tenantId Tenant Id
+     * @return Local Scope keys set
+     * @throws APIManagementException if fails to get the local scope keys
+     */
+    public Set<String> getAllLocalScopeKeysReferencedByAPI(String uuid, int tenantId) throws APIManagementException {
+
+        Set<String> localScopes = new HashSet<>();
+        try (Connection connection = APIMgtDBUtil.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(
+                     SQLConstants.GET_ALL_LOCAL_SCOPES_REFERENCED_BY_API_SQL)) {
+            preparedStatement.setInt(1, getAPIID(uuid, connection));
+            preparedStatement.setInt(2, tenantId);
+            preparedStatement.setInt(3, tenantId);
+            try (ResultSet rs = preparedStatement.executeQuery()) {
+                while (rs.next()) {
+                    localScopes.add(rs.getString("SCOPE_NAME"));
+                }
+            }
+        } catch (SQLException e) {
+            handleException("Failed while getting local scopes referenced by API: " + uuid + " tenant: " + tenantId,
+                    e);
+        }
+        return localScopes;
+    }
+
+    /**
+     * Gets the scope keys from the given set that are not attached to any resource of an API, an API revision or an
+     * API Product.
+     *
+     * @param scopeKeys Scope keys to check
+     * @param tenantId  Tenant Id
+     * @return Scope keys that are not attached to any resource
+     * @throws APIManagementException if fails to check the scope attachments
+     */
+    public Set<String> getUnattachedScopeKeys(Set<String> scopeKeys, int tenantId) throws APIManagementException {
+
+        Set<String> unattachedScopes = new HashSet<>();
+        try (Connection connection = APIMgtDBUtil.getConnection();
+             PreparedStatement preparedStatement = connection.prepareStatement(
+                     SQLConstants.IS_SCOPE_ATTACHED_TO_ANY_RESOURCE_SQL)) {
+            for (String scopeKey : scopeKeys) {
+                preparedStatement.setString(1, scopeKey);
+                preparedStatement.setInt(2, tenantId);
+                try (ResultSet rs = preparedStatement.executeQuery()) {
+                    if (!rs.next()) {
+                        unattachedScopes.add(scopeKey);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            handleException("Failed while checking the resource attachments of scopes in tenant: " + tenantId, e);
+        }
+        return unattachedScopes;
+    }
+
+    /**
      * Delete a user subscription based on API_ID, APP_ID, TIER_ID
      *
      * @param apiId - subscriber API ID

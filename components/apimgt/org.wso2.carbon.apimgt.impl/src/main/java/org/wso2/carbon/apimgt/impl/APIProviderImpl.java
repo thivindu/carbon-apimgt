@@ -1190,6 +1190,7 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
         Set<String> oldLocalScopeKeys;
         Set<String> oldVersionedLocalScopeKeys;
         Set<String> oldVersionedUnattachedLocalScopeKeys;
+        Set<String> revisionAndProductLocalScopeKeys;
         boolean isCreateNewVersion = false;
         int tenantId = -1;
 
@@ -1217,10 +1218,13 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
             oldVersionedLocalScopeKeys = apiMgtDAO.getVersionedLocalScopeKeysForAPI(api.getUuid(), tenantId);
             oldVersionedUnattachedLocalScopeKeys = apiMgtDAO.getAllUnattachedLocalScopeKeysFromVersionedAPIs(
                     api.getUuid(), tenantId);
+            // Local scopes kept for API revisions and API Products can be attached to the API again
+            revisionAndProductLocalScopeKeys = apiMgtDAO.getLocalScopeKeysUsedByRevisionsAndAPIProducts(api.getUuid(), tenantId);
         } else {
             oldLocalScopeKeys = Collections.emptySet();
             oldVersionedLocalScopeKeys = Collections.emptySet();
             oldVersionedUnattachedLocalScopeKeys = Collections.emptySet();
+            revisionAndProductLocalScopeKeys = Collections.emptySet();
             Set<String> apiVersions = getAPIVersions(api.getId().getProviderName(),
                     api.getId().getApiName(), api.getOrganization());
             if (!apiVersions.isEmpty()) {
@@ -1243,6 +1247,12 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
         if (!oldVersionedUnattachedLocalScopeKeys.isEmpty()) {
             scopesToAdd = scopesToAdd.stream()
                     .filter(scope -> !oldVersionedUnattachedLocalScopeKeys.contains(scope))
+                    .collect(Collectors.toSet());
+        }
+
+        if (!revisionAndProductLocalScopeKeys.isEmpty()) {
+            scopesToAdd = scopesToAdd.stream()
+                    .filter(scope -> !revisionAndProductLocalScopeKeys.contains(scope))
                     .collect(Collectors.toSet());
         }
 
@@ -1504,14 +1514,22 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
         Set<String> newLocalScopeKeys = newLocalScopes.stream().map(Scope::getKey).collect(Collectors.toSet());
         // Get the existing versioned local scope keys attached for the API
         Set<String> oldVersionedLocalScopeKeys = apiMgtDAO.getVersionedLocalScopeKeysForAPI(api.getUuid(), tenantId);
-        // Get the existing versioned local scope keys which needs to be removed (not updated) from the current updating
-        // API and remove them from the oldLocalScopeKeys set before sending to KM, so that they will not be removed
-        // from KM and can be still used by other versioned APIs.
+        // Get the local scope keys attached to the revisions of the API and to the resources of API Products built on
+        // the API
+        Set<String> revisionAndProductLocalScopeKeys = apiMgtDAO.getLocalScopeKeysUsedByRevisionsAndAPIProducts(
+                api.getUuid(), tenantId);
+        // Get the existing versioned local scope keys and the local scope keys used by API revisions and API Products
+        // which needs to be removed (not updated) from the current updating API and remove them from the
+        // oldLocalScopeKeys set before sending to KM, so that they will not be removed from KM and can be still used
+        // by other versioned APIs, API revisions and API Products. Only the resource scope mappings of the API are
+        // removed for them.
         Iterator oldLocalScopesItr = oldLocalScopeKeys.iterator();
         while (oldLocalScopesItr.hasNext()) {
             String oldLocalScopeKey = (String) oldLocalScopesItr.next();
-            // if the scope is used in versioned APIs and it is not in new local scope key set
-            if (oldVersionedLocalScopeKeys.contains(oldLocalScopeKey)
+            // if the scope is used in versioned APIs, API revisions or API Products and it is not in new local scope
+            // key set
+            if ((oldVersionedLocalScopeKeys.contains(oldLocalScopeKey)
+                    || revisionAndProductLocalScopeKeys.contains(oldLocalScopeKey))
                     && !newLocalScopeKeys.contains(oldLocalScopeKey)) {
                 //remove from old local scope key set which will be send to KM
                 oldLocalScopesItr.remove();
@@ -5622,12 +5640,18 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
             // Remove API Product-Label Mappings
             removeAPILabelMappings(apiProduct.getUuid());
 
+            int productTenantId = APIUtil.getTenantId(APIUtil.replaceEmailDomainBack(identifier.getProviderName()));
+            Set<String> productLocalScopeKeys = apiMgtDAO.getLocalScopeKeysOfAPIProduct(apiProduct.getUuid(),
+                    productTenantId);
+
             // gatewayType check is required when API Management is deployed on
             // other servers to avoid synapse
             deleteAPIProductRevisions(apiProduct.getUuid(), apiProduct.getOrganization());
 
             apiPersistenceInstance.deleteAPIProduct(new Organization(apiProduct.getOrganization()), apiProduct.getUuid());
             apiMgtDAO.deleteAPIProduct(identifier);
+            // Delete the local scopes that are no longer attached to any resource after deleting the API Product
+            deleteUnattachedLocalScopes(productLocalScopeKeys, productTenantId);
             cleanUpPendingAPIStateChangeTask(apiProduct.getProductId(), true);
             if (log.isDebugEnabled()) {
                 String logMessage =
@@ -5792,7 +5816,12 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
         if (product.isDefaultVersion() == null) {
             product.setDefaultVersion(true);
         }
+        int productTenantId = APIUtil.getTenantId(APIUtil.replaceEmailDomainBack(product.getId().getProviderName()));
+        Set<String> productLocalScopeKeys = apiMgtDAO.getLocalScopeKeysOfAPIProduct(product.getUuid(),
+                productTenantId);
         apiMgtDAO.updateAPIProduct(product, userNameWithoutChange);
+        // Delete the local scopes that are no longer attached to any resource after updating the resources
+        deleteUnattachedLocalScopes(productLocalScopeKeys, productTenantId);
         if (publishedDefaultVersion != null && product.isPublishedDefaultVersion() && !product.getId().getVersion()
                 .equals(publishedDefaultVersion)) {
             sendUpdateEventToPreviousDefaultVersion(product.getId().getProviderName(), product.getId().getName(),
@@ -6380,6 +6409,46 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
                 deleteScope(scope, tenantId);
             }
         }
+    }
+
+    /**
+     * Deletes the given local scopes from the database and the Key Managers if they are no longer attached to any
+     * resource of an API, an API revision or an API Product. Local scopes removed from an API are kept while API
+     * revisions or API Products still use them, so they are removed here once nothing uses them.
+     *
+     * @param localScopeKeys Local scope keys that were attached to the removed resources
+     * @param tenantId       Tenant Id
+     * @throws APIManagementException if fails to delete the scopes
+     */
+    private void deleteUnattachedLocalScopes(Set<String> localScopeKeys, int tenantId) throws APIManagementException {
+
+        if (localScopeKeys == null || localScopeKeys.isEmpty()) {
+            return;
+        }
+        Set<String> unattachedScopeKeys = apiMgtDAO.getUnattachedScopeKeys(localScopeKeys, tenantId);
+        if (unattachedScopeKeys.isEmpty()) {
+            return;
+        }
+        String scopeTenantDomain = APIUtil.getTenantDomainFromTenantId(tenantId);
+        Map<String, KeyManagerDto> tenantKeyManagers = KeyManagerHolder.getGlobalAndTenantKeyManagers(scopeTenantDomain);
+        for (Map.Entry<String, KeyManagerDto> keyManagerDtoEntry : tenantKeyManagers.entrySet()) {
+            KeyManager keyManager = keyManagerDtoEntry.getValue().getKeyManager();
+            if (keyManager != null) {
+                try {
+                    for (String scopeKey : unattachedScopeKeys) {
+                        keyManager.deleteScope(scopeKey);
+                    }
+                    if (log.isDebugEnabled()) {
+                        log.debug("Unattached local scopes " + unattachedScopeKeys + " are successfully deleted from"
+                                + " Key Manager : " + keyManagerDtoEntry.getKey() + ".");
+                    }
+                } catch (APIManagementException e) {
+                    log.error("Error while deleting unattached local scopes from Key Manager "
+                            + keyManagerDtoEntry.getKey(), e);
+                }
+            }
+        }
+        deleteScopes(unattachedScopeKeys, tenantId);
     }
 
     @Override
@@ -8329,7 +8398,10 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
             throw new APIManagementException(errorMessage, ExceptionCodes.from(ExceptionCodes.
                     ERROR_RESTORING_API_REVISION, apiRevision.getApiUUID()));
         }
+        int apiTenantId = APIUtil.getTenantId(APIUtil.replaceEmailDomainBack(apiIdentifier.getProviderName()));
+        Set<String> apiLocalScopeKeys = apiMgtDAO.getAllLocalScopeKeysReferencedByAPI(apiId, apiTenantId);
         apiMgtDAO.restoreAPIRevision(apiRevision, organization);
+        deleteUnattachedLocalScopes(apiLocalScopeKeys, apiTenantId);
     }
 
     /**
@@ -8376,7 +8448,10 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
             throw new APIManagementException(errorMessage, ExceptionCodes.from(ExceptionCodes.
                     ERROR_DELETING_API_REVISION, apiRevision.getApiUUID()));
         }
+        int apiTenantId = APIUtil.getTenantId(APIUtil.replaceEmailDomainBack(apiIdentifier.getProviderName()));
+        Set<String> apiLocalScopeKeys = apiMgtDAO.getAllLocalScopeKeysReferencedByAPI(apiId, apiTenantId);
         apiMgtDAO.deleteAPIRevision(apiRevision);
+        deleteUnattachedLocalScopes(apiLocalScopeKeys, apiTenantId);
         apiMgtDAO.deleteAllAPIMetadataRevision(apiId, apiRevisionId);
         apiMgtDAO.deleteAPIPrimaryEndpointMappingsByRevision(apiId, apiRevisionId);
         apiMgtDAO.deleteAIConfigurationRevision(apiRevision.getRevisionUUID());
@@ -8692,7 +8767,12 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
             throw new APIManagementException(errorMessage, ExceptionCodes.from(ExceptionCodes.
                     ERROR_RESTORING_API_REVISION, apiRevision.getApiUUID()));
         }
+        int productTenantId = APIUtil.getTenantId(
+                APIUtil.replaceEmailDomainBack(apiProductIdentifier.getProviderName()));
+        Set<String> productLocalScopeKeys = apiMgtDAO.getLocalScopeKeysOfAPIProduct(apiProductId, productTenantId);
         apiMgtDAO.restoreAPIProductRevision(apiRevision, organization);
+        // Delete the local scopes that are no longer attached to any resource after restoring the resources
+        deleteUnattachedLocalScopes(productLocalScopeKeys, productTenantId);
     }
 
     @Override
@@ -8725,7 +8805,12 @@ class APIProviderImpl extends AbstractAPIManager implements APIProvider {
             throw new APIManagementException(errorMessage, ExceptionCodes.from(ExceptionCodes.
                     ERROR_DELETING_API_REVISION, apiRevision.getApiUUID()));
         }
+        int productTenantId = APIUtil.getTenantId(
+                APIUtil.replaceEmailDomainBack(apiProductIdentifier.getProviderName()));
+        Set<String> productLocalScopeKeys = apiMgtDAO.getLocalScopeKeysOfAPIProduct(apiProductId, productTenantId);
         apiMgtDAO.deleteAPIProductRevision(apiRevision);
+        // Delete the local scopes that are no longer attached to any resource after deleting the revision
+        deleteUnattachedLocalScopes(productLocalScopeKeys, productTenantId);
         gatewayArtifactsMgtDAO.deleteGatewayArtifact(apiRevision.getApiUUID(), apiRevision.getRevisionUUID());
         if (artifactSaver != null) {
             try {

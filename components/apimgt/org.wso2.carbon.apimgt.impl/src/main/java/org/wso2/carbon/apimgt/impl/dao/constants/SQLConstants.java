@@ -3950,6 +3950,31 @@ public class SQLConstants {
                     + "          AND ARSM.TENANT_ID = ? "
                     + "  )";
 
+    public static final String GET_LOCAL_SCOPES_USED_BY_API_REVISIONS_AND_API_PRODUCTS_SQL =
+            "SELECT DISTINCT ARSM.SCOPE_NAME "
+                    + "FROM AM_API_RESOURCE_SCOPE_MAPPING ARSM "
+                    + "INNER JOIN AM_API_URL_MAPPING AUM ON ARSM.URL_MAPPING_ID = AUM.URL_MAPPING_ID "
+                    + "INNER JOIN AM_API API ON API.API_ID = AUM.API_ID "
+                    + "WHERE API.API_NAME = ? AND AUM.REVISION_UUID IS NOT NULL AND ARSM.TENANT_ID = ? AND "
+                    + "ARSM.SCOPE_NAME NOT IN (SELECT GS.NAME FROM AM_SHARED_SCOPE GS WHERE GS.TENANT_ID = ?)";
+
+    public static final String GET_LOCAL_SCOPES_OF_API_PRODUCT_SQL =
+            "SELECT DISTINCT ARSM.SCOPE_NAME "
+                    + "FROM AM_API_RESOURCE_SCOPE_MAPPING ARSM "
+                    + "INNER JOIN AM_API_PRODUCT_MAPPING APM ON ARSM.URL_MAPPING_ID = APM.URL_MAPPING_ID "
+                    + "WHERE APM.API_ID = ? AND ARSM.TENANT_ID = ? AND "
+                    + "ARSM.SCOPE_NAME NOT IN (SELECT GS.NAME FROM AM_SHARED_SCOPE GS WHERE GS.TENANT_ID = ?)";
+
+    public static final String GET_ALL_LOCAL_SCOPES_REFERENCED_BY_API_SQL =
+            "SELECT DISTINCT ARSM.SCOPE_NAME "
+                    + "FROM AM_API_RESOURCE_SCOPE_MAPPING ARSM "
+                    + "INNER JOIN AM_API_URL_MAPPING AUM ON ARSM.URL_MAPPING_ID = AUM.URL_MAPPING_ID "
+                    + "WHERE AUM.API_ID = ? AND ARSM.TENANT_ID = ? AND "
+                    + "ARSM.SCOPE_NAME NOT IN (SELECT GS.NAME FROM AM_SHARED_SCOPE GS WHERE GS.TENANT_ID = ?)";
+
+    public static final String IS_SCOPE_ATTACHED_TO_ANY_RESOURCE_SQL =
+            "SELECT 1 FROM AM_API_RESOURCE_SCOPE_MAPPING WHERE SCOPE_NAME = ? AND TENANT_ID = ?";
+
     public static final String GET_URL_TEMPLATES_WITH_SCOPES_FOR_API_SQL =
             " SELECT AUM.URL_MAPPING_ID, "
                     + "AUM.URL_PATTERN, "
